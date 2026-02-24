@@ -17,7 +17,7 @@ struct msp3520fb_hw_info{
 struct msp3520fb_hw_info msp3520fb_display = {
   .w = 128,
   .h = 64,
-  .bpp = 24,
+  .bpp = 32,
   .fps = 30
 };
 
@@ -34,7 +34,7 @@ static struct platform_driver msp3520fb_driver = {
 
 static struct platform_device *msp3520fb_platform_dev;
 
-static ssize_t dummy_fb_read(struct fb_info *info, char __user *buf,
+static ssize_t msp3520fb_fb_read(struct fb_info *info, char __user *buf,
 			   size_t count, loff_t *ppos)
 {
     pr_info("%s\n", __func__);
@@ -42,7 +42,7 @@ static ssize_t dummy_fb_read(struct fb_info *info, char __user *buf,
     return fb_sys_read(info, buf, count, ppos);
 }
 
-static ssize_t dummy_fb_write(struct fb_info *info, const char __user *buf,
+static ssize_t msp3520fb_fb_write(struct fb_info *info, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
     ssize_t ret = 0;
@@ -53,26 +53,26 @@ static ssize_t dummy_fb_write(struct fb_info *info, const char __user *buf,
 }
 
 
-static void dummy_fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
+static void msp3520fb_fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
     pr_info("%s\n", __func__);
     sys_fillrect(info, rect);
 }
 
-static void dummy_fb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
+static void msp3520fb_fb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
     pr_info("%s\n", __func__);
     sys_copyarea(info, area);
 }
 
-static void dummy_fb_imageblit(struct fb_info *info, const struct fb_image *image)
+static void msp3520fb_fb_imageblit(struct fb_info *info, const struct fb_image *image)
 {
     pr_info("%s\n", __func__);
     sys_imageblit(info, image);
 }
 
 
-static int dummy_mmap(struct fb_info *info, struct vm_area_struct *vma){
+static int msp3520fb_mmap(struct fb_info *info, struct vm_area_struct *vma){
   printk("mmaped");
   return fb_deferred_io_mmap(info, vma);
 }
@@ -96,7 +96,7 @@ static void msp3520fb_deferred_io(struct fb_info *info,
 
         loff_t b = (y_end - y_cur) * info->fix.line_length;
         
-          //dummy_fb_read(info, , b, &written);
+          //msp3520fb_fb_read(info, , b, &written);
         
 
         printk("pageref offset %ld; page size: %ld \n", pageref->offset, PAGE_SIZE);
@@ -114,51 +114,55 @@ static unsigned int chan_to_field(unsigned int chan, struct fb_bitfield *bf)
     return chan << bf->offset;
 }
 
-static int dummy_setcolreg(unsigned int regno, unsigned int red,
+static int msp3520fb_setcolreg(unsigned int regno, unsigned int red,
                                 unsigned int green, unsigned int blue,
                                 unsigned int transp, struct fb_info *info)
 {
-    unsigned int val;
-    int ret = 1;
+
+    printk("setcolreg: regno=%u pseudo_palette=%p visual=%u\n",
+           regno, info->pseudo_palette, info->fix.visual);
 
     //printk("%s\n", __func__);
     //pr_info("%s(regno=%u, red=0x%X, green=0x%X, blue=0x%X, trans=0x%X)\n",
     //       __func__, regno, red, green, blue, transp);
 
-    if (regno >= 256)   /* no. of hw registers */
-        return 1;
+    if (regno >= 256)   
+        return -EINVAL;
 
     switch (info->fix.visual) {
       case FB_VISUAL_PSEUDOCOLOR:
-        if (regno < 16) {
-            val  = chan_to_field(red, &info->var.red);
-            val |= chan_to_field(green, &info->var.green);
-            val |= chan_to_field(blue, &info->var.blue);
+        u32 v;
 
-            ((u32 *)(info->pseudo_palette))[regno] = val;
-            ret = 0;
-        }
-      break;
+        if (regno >= 16)
+          return -EINVAL;
+
+        v = (red << info->var.red.offset) |
+          (green << info->var.green.offset) |
+          (blue << info->var.blue.offset) |
+          (transp << info->var.transp.offset);
+
+        ((u32*)(info->pseudo_palette))[regno] = v;
+        break;
     }
 
-    return ret;
+    return 0;
 }
 
-static int dummy_checkvar(struct fb_var_screeninfo *var, struct fb_info *info){
+static int msp3520fb_checkvar(struct fb_var_screeninfo *var, struct fb_info *info){
   printk("%s\n", __func__);
-  printk("%d %d %d\n", var->red.length, var->green.length, var->blue.length);
+  printk("%d %d %d %d\n", var->red.length, var->green.length, var->blue.length, var->transp.length);
 
   return 0;
 }
 
-static int dummy_checkcmap(struct fb_cmap *cmap, struct fb_info *info){
+static int msp3520fb_setcmap(struct fb_cmap *cmap, struct fb_info *info){
   printk("%s\n", __func__);
   //printk("%hd %hd %hd\n", cmap->red, cmap->green, cmap->blue);
-  //return fb_set_cmap(cmap, info);
-  return 0;
+  printk("%hd\n", info->pseudo_palette);
+  return fb_set_cmap(cmap, info);
 }
 
-static int dummy_set_par(struct fb_info *info){
+static int msp3520fb_set_par(struct fb_info *info){
   printk("%s\n", __func__);
   return 0;
 }
@@ -186,12 +190,18 @@ int msp3520fb_probe(struct platform_device *dev){
     goto screenbuffer_cleanup;
   }
 
+  //fbcon compliance
+  u32 *pseudo_palette = kzalloc(sizeof(u32)*16, GFP_KERNEL);
+  if(!pseudo_palette){
+    goto screenbuffer_cleanup;
+  }
+
   info->screen_buffer = vmem;
   info->screen_base = vmem;
 
   snprintf(info->fix.id, sizeof(info->fix.id), "%s", "msp3520fb");
   info->fix.type = FB_TYPE_PACKED_PIXELS;
-  info->fix.visual = FB_VISUAL_PSEUDOCOLOR;
+  info->fix.visual = FB_VISUAL_TRUECOLOR;
   info->fix.xpanstep = 0;
   info->fix.ypanstep = 0;
   info->fix.ywrapstep = 0;
@@ -214,12 +224,13 @@ int msp3520fb_probe(struct platform_device *dev){
   info->var.green.length  = 8;
   info->var.blue.offset   = 16;
   info->var.blue.length   = 8;
-  info->var.transp.offset = 0;
-  info->var.transp.length = 0;
+  info->var.transp.offset = 24;
+  info->var.transp.length = 8;
 
+  info->pseudo_palette = pseudo_palette;
 
-  //if (fb_alloc_cmap(&info->cmap, 256, 0))
-	//  goto framebuffer_cleanup;
+  if (fb_alloc_cmap(&info->cmap, 256, 1))
+	  goto framebuffer_cleanup;
 
   struct fb_ops *fbops = kzalloc(sizeof(struct fb_ops), GFP_KERNEL);
   if(!fbops) {
@@ -227,16 +238,16 @@ int msp3520fb_probe(struct platform_device *dev){
   }
 
   fbops->owner = THIS_MODULE;
-  fbops->fb_read = dummy_fb_read;
-  fbops->fb_write = dummy_fb_write;
-  fbops->fb_mmap = dummy_mmap;
-  fbops->fb_fillrect = dummy_fb_fillrect;
-  fbops->fb_copyarea = dummy_fb_copyarea;
-  fbops->fb_imageblit = dummy_fb_imageblit;
-  fbops->fb_setcolreg = dummy_setcolreg;
-  fbops->fb_check_var = dummy_checkvar;
-  fbops->fb_setcmap = dummy_checkcmap;
-  fbops->fb_set_par = dummy_set_par;
+  fbops->fb_read = msp3520fb_fb_read;
+  fbops->fb_write = msp3520fb_fb_write;
+  fbops->fb_mmap = msp3520fb_mmap;
+  fbops->fb_fillrect = msp3520fb_fb_fillrect;
+  fbops->fb_copyarea = msp3520fb_fb_copyarea;
+  fbops->fb_imageblit = msp3520fb_fb_imageblit;
+  fbops->fb_setcolreg = msp3520fb_setcolreg;
+  fbops->fb_check_var = msp3520fb_checkvar;
+  fbops->fb_setcmap = msp3520fb_setcmap;
+  fbops->fb_set_par = msp3520fb_set_par;
 
   struct fb_deferred_io *fbdefio = kzalloc(sizeof(*fbdefio), GFP_KERNEL);
   if(!fbdefio){
@@ -268,7 +279,6 @@ framebuffer_cleanup:
     kfree(info->fbops);
   }
   unregister_framebuffer(info);
-  //fb_dealloc_cmap(&info->cmap);
   framebuffer_release(info);
 screenbuffer_cleanup:
   kfree(vmem);
